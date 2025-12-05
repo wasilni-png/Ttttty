@@ -1,304 +1,734 @@
-import telebot
-from telebot import types
-from flask import Flask, request, jsonify
+"""
+🚖 بوت النقل الذكي - نسخة مبسطة وخالية من المشاكل
+"""
+
 import os
 import logging
-import time
+import json
+from datetime import datetime
+from flask import Flask, request, jsonify
+import telebot
+from telebot import types
 
-# تكوين السجلات
+# ============================================================================
+# إعدادات أساسية
+# ============================================================================
+
+# إعداد التسجيل
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# تهيئة Flask app
+# الحصول على التوكن
+BOT_TOKEN = os.environ.get('BOT_TOKEN', 8425005126:AAExDibH8mxVpITuhA98AFfNcUo9Rgdd98A')
+
+# تهيئة التطبيق والبوت
 app = Flask(__name__)
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode='HTML')
 
-# التوكن - قم بتغييره إلى التوكن الخاص بك
-BOT_TOKEN = 8425005126:AAExDibH8mxVpITuhA98AFfNcUo9Rgdd98A"  # ضع التوكن هنا
-WEBHOOK_URL = ""  # رابط PythonAnywhere الخاص بك
+# ============================================================================
+# تخزين البيانات (في الذاكرة - لحفظ البساطة)
+# ============================================================================
 
-# تهيئة البوت
-bot = telebot.TeleBot(BOT_TOKEN)
-
-# تخزين البيانات
-user_data = {}
+# تخزين بيانات المستخدمين
+users = {}
+# تخزين الرحلات
 rides = {}
-ride_requests = []
-drivers_available = {}
-USER_STATES = {}
+# تخزين السائقين النشطين
+active_drivers = {}
+# تخزين طلبات الرحلات
+ride_requests = {}
 
-class UserRole:
-    CUSTOMER = 'customer'
-    DRIVER = 'driver'
+# ============================================================================
+# دوال مساعدة
+# ============================================================================
 
-class RideStatus:
-    REQUESTED = 'requested'
-    ACCEPTED = 'accepted'
-    IN_PROGRESS = 'in_progress'
-    COMPLETED = 'completed'
-    CANCELLED = 'cancelled'
+def save_data():
+    """حفظ البيانات في ملفات مؤقتة"""
+    try:
+        with open('users_data.json', 'w', encoding='utf-8') as f:
+            json.dump(users, f, ensure_ascii=False)
+        with open('rides_data.json', 'w', encoding='utf-8') as f:
+            json.dump(rides, f, ensure_ascii=False)
+        logger.info("💾 تم حفظ البيانات")
+    except Exception as e:
+        logger.error(f"❌ خطأ في حفظ البيانات: {e}")
+
+def load_data():
+    """تحميل البيانات من الملفات"""
+    global users, rides
+    try:
+        if os.path.exists('users_data.json'):
+            with open('users_data.json', 'r', encoding='utf-8') as f:
+                users = json.load(f)
+        if os.path.exists('rides_data.json'):
+            with open('rides_data.json', 'r', encoding='utf-8') as f:
+                rides = json.load(f)
+        logger.info("📂 تم تحميل البيانات")
+    except Exception as e:
+        logger.error(f"❌ خطأ في تحميل البيانات: {e}")
+
+def create_ride_keyboard(user_type="customer"):
+    """إنشاء لوحة مفاتيح حسب نوع المستخدم"""
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    
+    if user_type == "customer":
+        buttons = [
+            types.KeyboardButton('🚖 طلب رحلة جديدة'),
+            types.KeyboardButton('📍 إرسال موقعي', request_location=True),
+            types.KeyboardButton('📋 رحلاتي السابقة'),
+            types.KeyboardButton('💰 رصيدي'),
+            types.KeyboardButton('⚙️ الإعدادات'),
+            types.KeyboardButton('📞 الدعم')
+        ]
+    else:  # driver
+        buttons = [
+            types.KeyboardButton('🟢 بدء العمل'),
+            types.KeyboardButton('🔴 إنهاء العمل'),
+            types.KeyboardButton('📍 تحديث موقعي', request_location=True),
+            types.KeyboardButton('📋 رحلاتي'),
+            types.KeyboardButton('💰 أرباحي'),
+            types.KeyboardButton('📞 الدعم')
+        ]
+    
+    markup.add(*buttons)
+    return markup
+
+def create_inline_ride_buttons(ride_id):
+    """إنشاء أزرار داخلية للرحلة"""
+    from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+    markup = InlineKeyboardMarkup()
+    markup.row_width = 2
+    
+    buttons = [
+        InlineKeyboardButton("✅ قبول الرحلة", callback_data=f"accept_{ride_id}"),
+        InlineKeyboardButton("❌ رفض الرحلة", callback_data=f"reject_{ride_id}")
+    ]
+    
+    markup.add(*buttons)
+    return markup
+
+# ============================================================================
+# معالجات البوت
+# ============================================================================
+
+@bot.message_handler(commands=['start', 'help'])
+def handle_start(message):
+    """معالجة أمر البدء"""
+    user_id = str(message.from_user.id)
+    first_name = message.from_user.first_name
+    username = message.from_user.username or ""
+    
+    logger.info(f"👋 /start من: {first_name} ({user_id})")
+    
+    # حفظ بيانات المستخدم
+    users[user_id] = {
+        'id': user_id,
+        'username': username,
+        'first_name': first_name,
+        'role': None,
+        'balance': 0.0,
+        'total_rides': 0,
+        'created_at': datetime.now().isoformat()
+    }
+    
+    # عرض خيارات التسجيل
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add(
+        types.KeyboardButton('👤 عميل'),
+        types.KeyboardButton('🚖 سائق'),
+        types.KeyboardButton('📞 المساعدة')
+    )
+    
+    welcome_msg = f"""🎉 <b>مرحباً {first_name} في بوت النقل الذكي!</b>
+
+🚖 <b>خدمة نقل ذكية توفر لك:</b>
+• رحلات سريعة وآمنة
+• تتبع مباشر للرحلة
+• دفع إلكتروني آمن
+• تقييمات موثوقة
+
+📱 <b>اختر دورك للبدء:</b>"""
+    
+    bot.send_message(message.chat.id, welcome_msg, reply_markup=markup)
+
+@bot.message_handler(func=lambda msg: msg.text in ['👤 عميل', '🚖 سائق'])
+def handle_role_selection(message):
+    """معالجة اختيار الدور"""
+    user_id = str(message.from_user.id)
+    role_text = message.text
+    role = "customer" if role_text == "👤 عميل" else "driver"
+    
+    logger.info(f"🎭 اختيار دور: {role} من: {user_id}")
+    
+    # تحديث دور المستخدم
+    if user_id in users:
+        users[user_id]['role'] = role
+    
+    # إنشاء القائمة المناسبة
+    markup = create_ride_keyboard(role)
+    
+    role_msg = {
+        "customer": "👤 <b>تم تسجيلك كعميل بنجاح!</b>\n\nيمكنك الآن طلب رحلات بسهولة وأمان.",
+        "driver": "🚖 <b>تم تسجيلك كسائق بنجاح!</b>\n\nيمكنك الآن بدء العمل واستقبال طلبات الركوب."
+    }
+    
+    bot.send_message(
+        message.chat.id,
+        role_msg[role] + "\n\n🔧 <b>اختر الخدمة المناسبة:</b>",
+        reply_markup=markup
+    )
+
+@bot.message_handler(func=lambda msg: msg.text == '🚖 طلب رحلة جديدة')
+def handle_new_ride_request(message):
+    """معالجة طلب رحلة جديدة"""
+    user_id = str(message.from_user.id)
+    
+    logger.info(f"🚖 طلب رحلة جديدة من: {user_id}")
+    
+    # التحقق من أن المستخدم عميل
+    if user_id not in users or users[user_id].get('role') != 'customer':
+        bot.send_message(message.chat.id, "❌ يجب أن تكون مسجلاً كعميل لطلب رحلة.")
+        return
+    
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(
+        types.KeyboardButton('📍 إرسال موقعي', request_location=True),
+        types.KeyboardButton('رجوع')
+    )
+    
+    bot.send_message(
+        message.chat.id,
+        "📍 <b>طلب رحلة جديدة</b>\n\n"
+        "الرجاء إرسال موقعك الحالي لتحديد نقطة الانطلاق.",
+        reply_markup=markup
+    )
+
+@bot.message_handler(func=lambda msg: msg.text == '🟢 بدء العمل')
+def handle_driver_start(message):
+    """بدء عمل السائق"""
+    user_id = str(message.from_user.id)
+    
+    logger.info(f"🟢 بدء عمل سائق: {user_id}")
+    
+    # التحقق من أن المستخدم سائق
+    if user_id not in users or users[user_id].get('role') != 'driver':
+        bot.send_message(message.chat.id, "❌ يجب أن تكون مسجلاً كسائق لبدء العمل.")
+        return
+    
+    # إضافة السائق إلى القائمة النشطة
+    active_drivers[user_id] = {
+        'id': user_id,
+        'username': users[user_id].get('username', ''),
+        'first_name': users[user_id].get('first_name', ''),
+        'is_available': True,
+        'started_at': datetime.now().isoformat()
+    }
+    
+    bot.send_message(
+        message.chat.id,
+        "✅ <b>تم تفعيل وضع السائق!</b>\n\n"
+        "🎯 أنت الآن تستقبل طلبات الركوب تلقائياً.\n"
+        "📍 تأكد من تحديث موقعك بانتظام.\n\n"
+        "لإيقاف الخدمة، اضغط '🔴 إنهاء العمل'"
+    )
+
+@bot.message_handler(func=lambda msg: msg.text == '🔴 إنهاء العمل')
+def handle_driver_stop(message):
+    """إنهاء عمل السائق"""
+    user_id = str(message.from_user.id)
+    
+    logger.info(f"🔴 إنهاء عمل سائق: {user_id}")
+    
+    # إزالة السائق من القائمة النشطة
+    if user_id in active_drivers:
+        del active_drivers[user_id]
+    
+    bot.send_message(
+        message.chat.id,
+        "🔴 <b>تم إيقاف خدمة الاستقبال</b>\n\n"
+        "للعودة لاستقبال الطلبات، اضغط '🟢 بدء العمل'"
+    )
+
+@bot.message_handler(content_types=['location'])
+def handle_location(message):
+    """معالجة الموقع المرسل"""
+    user_id = str(message.from_user.id)
+    location = message.location
+    
+    logger.info(f"📍 موقع من: {user_id} - {location.latitude}, {location.longitude}")
+    
+    if user_id not in users:
+        bot.send_message(message.chat.id, "❌ يجب البدء باستخدام /start أولاً.")
+        return
+    
+    user = users[user_id]
+    
+    if user.get('role') == 'customer':
+        # إنشاء طلب رحلة جديد
+        ride_id = f"ride_{user_id}_{int(datetime.now().timestamp())}"
+        
+        ride_data = {
+            'ride_id': ride_id,
+            'customer_id': user_id,
+            'customer_name': user.get('first_name', 'عميل'),
+            'pickup_location': {
+                'lat': location.latitude,
+                'lng': location.longitude
+            },
+            'status': 'pending',
+            'fare': 15.0,
+            'created_at': datetime.now().isoformat()
+        }
+        
+        # حفظ الرحلة
+        rides[ride_id] = ride_data
+        
+        # إعلام المستخدم
+        bot.send_message(
+            message.chat.id,
+            "📍 <b>تم استلام موقعك بنجاح!</b>\n\n"
+            f"• <b>خط العرض:</b> {location.latitude:.6f}\n"
+            f"• <b>خط الطول:</b> {location.longitude:.6f}\n\n"
+            "🚖 <b>تم إنشاء طلب رحلة!</b>\n"
+            "⏳ جاري البحث عن سائق قريب...",
+            reply_markup=create_ride_keyboard("customer")
+        )
+        
+        # البحث عن سائقين متاحين
+        if active_drivers:
+            # إرسال طلب الرحلة للسائقين المتاحين
+            for driver_id, driver in active_drivers.items():
+                try:
+                    markup = create_inline_ride_buttons(ride_id)
+                    
+                    bot.send_message(
+                        driver_id,
+                        f"🚖 <b>طلب رحلة جديد</b>\n\n"
+                        f"• <b>العميل:</b> {user.get('first_name', 'عميل')}\n"
+                        f"• <b>التكلفة:</b> 15 ريال\n\n"
+                        f"<b>رقم الرحلة:</b> {ride_id[-8:]}",
+                        reply_markup=markup
+                    )
+                except Exception as e:
+                    logger.error(f"❌ فشل إرسال طلب الرحلة للسائق {driver_id}: {e}")
+            
+            logger.info(f"✅ تم إرسال طلب الرحلة لـ {len(active_drivers)} سائق")
+        else:
+            bot.send_message(
+                message.chat.id,
+                "⚠️ <b>لا يوجد سائقون متاحون حالياً</b>\n\n"
+                "يرجى المحاولة مرة أخرى لاحقاً.",
+                reply_markup=create_ride_keyboard("customer")
+            )
+    
+    elif user.get('role') == 'driver':
+        # تحديث موقع السائق
+        if user_id in active_drivers:
+            active_drivers[user_id]['location'] = {
+                'lat': location.latitude,
+                'lng': location.longitude
+            }
+        
+        bot.send_message(
+            message.chat.id,
+            "📍 <b>تم تحديث موقعك بنجاح!</b>\n\n"
+            f"• <b>خط العرض:</b> {location.latitude:.6f}\n"
+            f"• <b>خط الطول:</b> {location.longitude:.6f}\n\n"
+            "✅ <b>تم تحديث موقع السائق</b>",
+            reply_markup=create_ride_keyboard("driver")
+        )
+
+@bot.message_handler(func=lambda msg: msg.text == '📋 رحلاتي السابقة')
+def handle_my_rides(message):
+    """عرض رحلات المستخدم السابقة"""
+    user_id = str(message.from_user.id)
+    
+    logger.info(f"📋 طلب رحلات سابقة من: {user_id}")
+    
+    user_rides = []
+    for ride_id, ride in rides.items():
+        if ride.get('customer_id') == user_id or ride.get('driver_id') == user_id:
+            user_rides.append(ride)
+    
+    if not user_rides:
+        bot.send_message(
+            message.chat.id,
+            "📭 <b>لا توجد رحلات سابقة</b>",
+            reply_markup=create_ride_keyboard("customer")
+        )
+        return
+    
+    response = "📋 <b>رحلاتي السابقة</b>\n\n"
+    
+    for ride in user_rides[:5]:  # عرض آخر 5 رحلات فقط
+        status_emoji = {
+            'pending': '⏳',
+            'accepted': '✅',
+            'in_progress': '🚗',
+            'completed': '🎉',
+            'cancelled': '❌'
+        }.get(ride.get('status', 'pending'), '❓')
+        
+        response += (
+            f"{status_emoji} <b>رحلة #{ride.get('ride_id', '')[8:]}</b>\n"
+            f"• <b>الحالة:</b> {ride.get('status', 'غير معروف')}\n"
+            f"• <b>التكلفة:</b> {ride.get('fare', 0)} ريال\n\n"
+        )
+    
+    bot.send_message(
+        message.chat.id,
+        response,
+        reply_markup=create_ride_keyboard("customer")
+    )
+
+@bot.message_handler(func=lambda msg: msg.text == '💰 رصيدي')
+def handle_balance(message):
+    """عرض رصيد المستخدم"""
+    user_id = str(message.from_user.id)
+    
+    if user_id not in users:
+        bot.send_message(message.chat.id, "❌ يجب البدء باستخدام /start أولاً.")
+        return
+    
+    user = users[user_id]
+    
+    bot.send_message(
+        message.chat.id,
+        f"💰 <b>رصيدك الحالي:</b> {user.get('balance', 0)} ريال\n\n"
+        f"📊 <b>إحصائياتك:</b>\n"
+        f"• عدد الرحلات: {user.get('total_rides', 0)}\n",
+        reply_markup=create_ride_keyboard("customer")
+    )
+
+@bot.message_handler(func=lambda msg: msg.text == '📞 الدعم' or msg.text == '📞 المساعدة')
+def handle_support(message):
+    """عرض معلومات الدعم"""
+    support_msg = """📞 <b>مركز المساعدة والدعم</b>
+
+<b>👤 للعملاء:</b>
+• استخدم /start للبدء
+• اختر '👤 عميل'
+• اضغط '🚖 طلب رحلة جديدة'
+• أرسل موقعك
+
+<b>🚖 للسائقين:</b>
+• اختر '🚖 سائق'
+• اضغط '🟢 بدء العمل'
+• أرسل موقعك
+
+<b>📋 الأوامر:</b>
+/start - بدء البوت
+/help - هذه الرسالة
+
+<b>📞 الدعم الفني:</b>
+للشكاوى والاستفسارات، تواصل مع الدعم."""
+    
+    bot.send_message(
+        message.chat.id,
+        support_msg,
+        reply_markup=create_ride_keyboard("customer")
+    )
+
+@bot.message_handler(func=lambda msg: msg.text == 'رجوع')
+def handle_back(message):
+    """العودة للقائمة الرئيسية"""
+    user_id = str(message.from_user.id)
+    
+    if user_id not in users:
+        bot.send_message(message.chat.id, "❌ يجب البدء باستخدام /start أولاً.")
+        return
+    
+    role = users[user_id].get('role', 'customer')
+    markup = create_ride_keyboard(role)
+    
+    bot.send_message(
+        message.chat.id,
+        "🔙 <b>تم العودة للقائمة الرئيسية</b>",
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callback_query(call):
+    """معالجة استدعاء الأزرار"""
+    user_id = str(call.from_user.id)
+    callback_data = call.data
+    
+    logger.info(f"🔘 ضغط زر: {callback_data} من: {user_id}")
+    
+    if callback_data.startswith('accept_'):
+        # قبول الرحلة
+        ride_id = callback_data.split('_')[1]
+        
+        if ride_id in rides and rides[ride_id]['status'] == 'pending':
+            # تحديث حالة الرحلة
+            rides[ride_id]['status'] = 'accepted'
+            rides[ride_id]['driver_id'] = user_id
+            rides[ride_id]['driver_name'] = users.get(user_id, {}).get('first_name', 'سائق')
+            rides[ride_id]['accepted_at'] = datetime.now().isoformat()
+            
+            # إعلام السائق
+            bot.answer_callback_query(call.id, "✅ تم قبول الرحلة!")
+            bot.edit_message_text(
+                f"✅ <b>لقد قبلت الرحلة #{ride_id[8:]}</b>\n\n"
+                f"• <b>العميل:</b> {rides[ride_id].get('customer_name', 'عميل')}\n"
+                f"• <b>التكلفة:</b> {rides[ride_id].get('fare', 0)} ريال\n\n"
+                f"🚗 توجه الآن إلى موقع العميل.",
+                call.message.chat.id,
+                call.message.message_id
+            )
+            
+            # إعلام العميل
+            customer_id = rides[ride_id].get('customer_id')
+            if customer_id:
+                try:
+                    bot.send_message(
+                        customer_id,
+                        f"✅ <b>تم العثور على سائق!</b>\n\n"
+                        f"🎉 تهانينا! سائقنا في طريقه إليك الآن.\n"
+                        f"• <b>رقم الرحلة:</b> {ride_id[8:]}\n"
+                        f"• <b>التكلفة:</b> {rides[ride_id].get('fare', 0)} ريال\n\n"
+                        f"⏳ الرجاء الانتظار، السائق في الطريق..."
+                    )
+                except Exception as e:
+                    logger.error(f"❌ فشل إعلام العميل: {e}")
+    
+    elif callback_data.startswith('reject_'):
+        # رفض الرحلة
+        ride_id = callback_data.split('_')[1]
+        
+        bot.answer_callback_query(call.id, "❌ تم رفض الرحلة")
+        bot.edit_message_text(
+            f"❌ <b>تم رفض الرحلة #{ride_id[8:]}</b>",
+            call.message.chat.id,
+            call.message.message_id
+        )
+
+@bot.message_handler(func=lambda message: True)
+def handle_all_messages(message):
+    """معالجة جميع الرسائل الأخرى"""
+    logger.info(f"📩 رسالة عامة: {message.text} من {message.from_user.id}")
+    
+    bot.reply_to(
+        message,
+        "🤖 <b>مرحباً!</b>\n\n"
+        "استخدم /start لرؤية القائمة الرئيسية.\n"
+        "أو اختر من الأزرار في القائمة."
+    )
+
+# ============================================================================
+# صفحات الويب
+# ============================================================================
 
 @app.route('/')
 def home():
-    return '''
+    """الصفحة الرئيسية"""
+    try:
+        bot_info = bot.get_me()
+        bot_status = f"@{bot_info.username}"
+    except:
+        bot_status = "❌ غير متصل"
+    
+    return f'''
     <!DOCTYPE html>
-    <html lang="ar" dir="rtl">
+    <html dir="rtl">
     <head>
         <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>🚖 بوت وسيل للنقل</title>
+        <title>🚖 بوت النقل الذكي</title>
         <style>
-            * {
-                margin: 0;
-                padding: 0;
-                box-sizing: border-box;
-            }
-            
-            body {
-                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            body {{
+                font-family: Arial, sans-serif;
                 background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                 color: white;
-                min-height: 100vh;
                 padding: 20px;
-                direction: rtl;
-            }
-            
-            .container {
-                max-width: 800px;
+                min-height: 100vh;
+            }}
+            .container {{
+                max-width: 600px;
                 margin: 0 auto;
                 background: rgba(255, 255, 255, 0.1);
-                backdrop-filter: blur(10px);
-                border-radius: 20px;
                 padding: 40px;
-                box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-                border: 1px solid rgba(255, 255, 255, 0.2);
-            }
-            
-            header {
+                border-radius: 20px;
                 text-align: center;
-                margin-bottom: 40px;
-            }
-            
-            h1 {
-                font-size: 3em;
-                margin-bottom: 10px;
-                background: linear-gradient(45deg, #fff, #f0f0f0);
-                -webkit-background-clip: text;
-                -webkit-text-fill-color: transparent;
-            }
-            
-            .subtitle {
-                font-size: 1.2em;
-                opacity: 0.9;
-                margin-bottom: 30px;
-            }
-            
-            .status-card {
+            }}
+            .stats-grid {{
+                display: grid;
+                grid-template-columns: repeat(2, 1fr);
+                gap: 15px;
+                margin: 30px 0;
+            }}
+            .stat-card {{
                 background: rgba(255, 255, 255, 0.15);
-                border-radius: 15px;
-                padding: 25px;
-                margin-bottom: 30px;
-                border: 1px solid rgba(255, 255, 255, 0.1);
-            }
-            
-            .status-card h3 {
-                font-size: 1.5em;
-                margin-bottom: 15px;
-                color: #fff;
-            }
-            
-            .stats {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-                gap: 15px;
-                margin-top: 20px;
-            }
-            
-            .stat-item {
-                background: rgba(255, 255, 255, 0.1);
                 padding: 15px;
                 border-radius: 10px;
-                text-align: center;
-            }
-            
-            .stat-value {
-                font-size: 1.8em;
-                font-weight: bold;
-                margin-bottom: 5px;
-                color: #4CAF50;
-            }
-            
-            .stat-label {
-                font-size: 0.9em;
-                opacity: 0.8;
-            }
-            
-            .actions {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-                gap: 15px;
-                margin-top: 30px;
-            }
-            
-            .btn {
-                display: block;
-                padding: 15px;
-                background: linear-gradient(45deg, #4CAF50, #45a049);
-                color: white;
-                text-decoration: none;
-                border-radius: 10px;
-                text-align: center;
-                font-weight: bold;
-                transition: all 0.3s ease;
-                border: none;
-                cursor: pointer;
-            }
-            
-            .btn:hover {
-                transform: translateY(-2px);
-                box-shadow: 0 10px 20px rgba(0, 0, 0, 0.2);
-                background: linear-gradient(45deg, #45a049, #3d8b40);
-            }
-            
-            .btn-secondary {
-                background: linear-gradient(45deg, #2196F3, #1976D2);
-            }
-            
-            .btn-secondary:hover {
-                background: linear-gradient(45deg, #1976D2, #1565C0);
-            }
-            
-            .btn-danger {
-                background: linear-gradient(45deg, #f44336, #d32f2f);
-            }
-            
-            .btn-danger:hover {
-                background: linear-gradient(45deg, #d32f2f, #c62828);
-            }
-            
-            .info {
-                background: rgba(255, 255, 255, 0.05);
-                padding: 20px;
-                border-radius: 10px;
-                margin-top: 30px;
-                font-size: 0.9em;
-                border-right: 4px solid #4CAF50;
-            }
-            
-            .bot-info {
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                gap: 20px;
-                margin-top: 20px;
-            }
-            
-            .bot-avatar {
-                width: 80px;
-                height: 80px;
-                background: rgba(255, 255, 255, 0.1);
-                border-radius: 50%;
-                display: flex;
-                align-items: center;
-                justify-content: center;
+            }}
+            .stat-number {{
                 font-size: 2em;
-            }
-            
-            .bot-details {
-                text-align: right;
-            }
-            
-            footer {
-                margin-top: 40px;
-                text-align: center;
-                opacity: 0.7;
-                font-size: 0.9em;
-                padding-top: 20px;
-                border-top: 1px solid rgba(255, 255, 255, 0.1);
-            }
-            
-            @media (max-width: 600px) {
-                .container {
-                    padding: 20px;
-                }
-                
-                h1 {
-                    font-size: 2em;
-                }
-                
-                .stats {
-                    grid-template-columns: 1fr;
-                }
-                
-                .actions {
-                    grid-template-columns: 1fr;
-                }
-            }
+                font-weight: bold;
+                margin: 10px 0;
+            }}
+            .btn {{
+                display: inline-block;
+                padding: 12px 24px;
+                background: white;
+                color: #667eea;
+                text-decoration: none;
+                border-radius: 8px;
+                margin: 10px;
+                font-weight: bold;
+            }}
         </style>
     </head>
     <body>
         <div class="container">
-            <header>
-                <div class="bot-info">
-                    <div class="bot-avatar">🚖</div>
-                    <div class="bot-details">
-                        <h1>بوت وسيل للنقل</h1>
-                        <p class="subtitle">خدمة نقل ذكية - آمنة - سريعة</p>
-                    </div>
-                </div>
-            </header>
+            <h1>🚖 بوت النقل الذكي</h1>
+            <p>نظام متكامل لإدارة طلبات النقل</p>
             
-            <div class="status-card">
-                <h3>📊 حالة النظام</h3>
-                <div class="stats">
-                    <div class="stat-item">
-                        <div class="stat-value">🟢</div>
-                        <div class="stat-label">الحالة</div>
-                    </div>
-                    <div class="stat-item">
-                        <div class="stat-value">''' + str(len(user_data)) + '''</div>
-                        <div class="stat-label">المستخدمون</div>
-                    </div>
-                    <div class="stat-item">
-                        <div class="stat-value">''' + str(len(drivers_available)) + '''</div>
-                        <div class="stat-label">سائقون متاحون</div>
-                    </div>
-                    <div class="stat-item">
-                        <div class="stat-value">''' + str(len([r for r in rides.values() if r['status'] in ['requested', 'accepted']])) + '''</div>
-                        <div class="stat-label">رحلات نشطة</div>
-                    </div>
+            <div style="margin: 20px 0;">
+                <p>🤖 <strong>حالة البوت:</strong> {bot_status}</p>
+            </div>
+            
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div>👥 المستخدمين</div>
+                    <div class="stat-number">{len(users)}</div>
+                </div>
+                <div class="stat-card">
+                    <div>🚖 السائقين</div>
+                    <div class="stat-number">{sum(1 for u in users.values() if u.get('role') == 'driver')}</div>
+                </div>
+                <div class="stat-card">
+                    <div>📊 الرحلات</div>
+                    <div class="stat-number">{len(rides)}</div>
+                </div>
+                <div class="stat-card">
+                    <div>🟢 النشطين</div>
+                    <div class="stat-number">{len(active_drivers)}</div>
                 </div>
             </div>
             
-            <div class="actions">
+            <div>
                 <a href="/set_webhook" class="btn">⚙️ تعيين ويب هوك</a>
-                <a href="/health" class="btn btn-secondary">🩺 فحص الصحة</a>
-                <a href="/remove_webhook" class="btn btn-danger">🗑️ إزالة ويب هوك</a>
-                <a href="https://t.me/''' + (bot.get_me().username if bot.get_me() else 'BotFather') + '''" target="_blank" class="btn btn-secondary">💬 فتح البوت</a>
+                <a href="/test_bot" class="btn">🧪 اختبار البوت</a>
+                <a href="https://t.me/Dhdhdyduudbot" target="_blank" class="btn">💬 فتح البوت</a>
             </div>
             
-            <div class="info">
-                <h4>📝 معلومات البوت:</h4>
-                <p>• اسم البوت: ''' + (bot.get_me().first_name if bot.get_me() else 'غير متصل') + '''</p>
-                <p>• معرف البوت: @''' + (bot.get_me().username if bot.get_me() else 'غير متوفر') + '''</p>
-                <p>• رابط الويب هوك: ''' + WEBHOOK_URL + '''/webhook</p>
-                <p>• آخر تحديث: ''' + time.strftime("%Y-%m-%d %H:%M:%S") + '''</p>
+            <div style="margin-top: 40px; opacity: 0.8;">
+                <p>🔗 الرابط: https://dhhfhfjd.onrender.com</p>
+                <p>© 2024 بوت النقل الذكي</p>
             </div>
-            
-            <div class="info">
-                <h4>🎯 تعليمات التشغيل:</h4>
-                <p>1. تأكد من تعيين التوكن الصحيح في السطر 21</p>
-                <p>2. اضغط "تعيين ويب هوك" لتفعيل البوت</p>
-                <p>3. افتح البوت في تلجرام وابدأ الاستخدام</p>
-                <p>4. راقب حالة النظام من هذه الصفحة</p>
+        </div>
+    </body>
+    </html>
+    '''
+
+@app.route('/set_webhook')
+def set_webhook():
+    """تعيين ويب هوك"""
+    try:
+        webhook_url = f"https://{request.host}/webhook"
+        
+        logger.info(f"🔄 محاولة تعيين ويب هوك على: {webhook_url}")
+        
+        bot.remove_webhook()
+        bot.set_webhook(url=webhook_url)
+        
+        bot_info = bot.get_me()
+        
+        return f'''
+        <!DOCTYPE html>
+        <html dir="rtl">
+        <head>
+            <meta charset="UTF-8">
+            <title>✅ تم تعيين الويب هوك</title>
+            <style>
+                body {{
+                    padding: 50px;
+                    text-align: center;
+                    font-family: Arial, sans-serif;
+                }}
+                .success {{
+                    background: #d4edda;
+                    color: #155724;
+                    padding: 20px;
+                    border-radius: 10px;
+                    margin: 20px auto;
+                    max-width: 600px;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="success">
+                <h2>✅ تم تعيين الويب هوك بنجاح!</h2>
+                <p><strong>البوت:</strong> @{bot_info.username}</p>
+                <p><strong>الرابط:</strong> {webhook_url}</p>
             </div>
-            
-            <footer>
-                <p>© 2024 بوت وسيل للنقل | تم التطوير باستخدام Python + Flask + pyTelegramBotAPI</p>
-                <p>PythonAnywhere Hosting | mohammedieke.pythonanywhere.com</p>
-            </footer>
+            <div style="margin-top: 30px;">
+                <a href="https://t.me/{bot_info.username}" target="_blank" style="padding: 10px 20px; background: #0088cc; color: white; text-decoration: none; border-radius: 5px;">
+                    💬 افتح البوت الآن
+                </a>
+            </div>
+            <div style="margin-top: 20px;">
+                <a href="/">العودة للصفحة الرئيسية</a>
+            </div>
+        </body>
+        </html>
+        '''
+    except Exception as e:
+        logger.error(f"❌ خطأ في تعيين الويب هوك: {e}")
+        return f'''
+        <div style="padding: 50px; text-align: center;">
+            <h2 style="color: red;">❌ خطأ في تعيين الويب هوك</h2>
+            <p>{str(e)}</p>
+            <a href="/">العودة</a>
+        </div>
+        ''', 500
+
+@app.route('/test_bot')
+def test_bot():
+    """صفحة اختبار البوت"""
+    return '''
+    <!DOCTYPE html>
+    <html dir="rtl">
+    <head>
+        <meta charset="UTF-8">
+        <title>🧪 اختبار البوت</title>
+        <style>
+            body { padding: 30px; font-family: Arial; text-align: center; }
+            .instructions { 
+                background: #e9f7fe; 
+                padding: 20px; 
+                border-radius: 10px;
+                text-align: right;
+                margin: 20px auto;
+                max-width: 500px;
+            }
+        </style>
+    </head>
+    <body>
+        <h1>🧪 اختبار البوت</h1>
+        
+        <div class="instructions">
+            <h3>📱 خطوات الاختبار:</h3>
+            <ol>
+                <li>افتح تطبيق Telegram على هاتفك</li>
+                <li>ابحث عن: <strong>@Dhdhdyduudbot</strong></li>
+                <li>أرسل: <code>/start</code></li>
+                <li>اضغط على "👤 عميل" أو "🚖 سائق"</li>
+                <li>جرب الأزرار المختلفة</li>
+            </ol>
+        </div>
+        
+        <div style="margin-top: 30px;">
+            <a href="https://t.me/Dhdhdyduudbot" target="_blank" style="padding: 15px 30px; background: #0088cc; color: white; text-decoration: none; border-radius: 8px; font-size: 1.2em;">
+                🚀 افتح البوت الآن
+            </a>
+        </div>
+        
+        <div style="margin-top: 30px;">
+            <a href="/">العودة للصفحة الرئيسية</a>
         </div>
     </body>
     </html>
@@ -306,473 +736,53 @@ def home():
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
+    """نقطة استقبال تحديثات Telegram"""
     if request.headers.get('content-type') == 'application/json':
-        json_string = request.get_data().decode('utf-8')
-        update = telebot.types.Update.de_json(json_string)
-        bot.process_new_updates([update])
-        return 'OK', 200
+        try:
+            json_string = request.get_data().decode('utf-8')
+            update = telebot.types.Update.de_json(json_string)
+            
+            logger.info(f"📩 استلام تحديث: {update.update_id}")
+            
+            bot.process_new_updates([update])
+            
+            logger.info(f"✅ تم معالجة تحديث: {update.update_id}")
+            return 'OK', 200
+            
+        except Exception as e:
+            logger.error(f"❌ خطأ في ويب هوك: {e}")
+            return 'Error', 500
+    
     return 'Bad Request', 400
 
-@app.route('/set_webhook', methods=['GET'])
-def set_webhook():
-    try:
-        bot.remove_webhook()
-        time.sleep(1)
-        webhook_url = f"{WEBHOOK_URL}/webhook"
-        bot.set_webhook(url=webhook_url)
-        webhook_info = bot.get_webhook_info()
-        
-        return '''
-        <!DOCTYPE html>
-        <html dir="rtl">
-        <head>
-            <title>✅ تم تعيين الويب هوك</title>
-            <meta charset="utf-8">
-            <style>
-                body {
-                    font-family: Arial, sans-serif;
-                    text-align: center;
-                    padding: 50px;
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    color: white;
-                }
-                .container {
-                    background: rgba(255,255,255,0.1);
-                    padding: 40px;
-                    border-radius: 20px;
-                    max-width: 600px;
-                    margin: 0 auto;
-                }
-                .success {
-                    font-size: 3em;
-                    margin-bottom: 20px;
-                }
-                .btn {
-                    display: inline-block;
-                    padding: 10px 20px;
-                    background: white;
-                    color: #667eea;
-                    text-decoration: none;
-                    border-radius: 5px;
-                    margin: 10px;
-                }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="success">✅</div>
-                <h1>تم تعيين الويب هوك بنجاح!</h1>
-                <p><strong>الرابط:</strong> %s</p>
-                <p><strong>الحالة:</strong> %s</p>
-                <p><strong>آخر خطأ:</strong> %s</p>
-                <br>
-                <a href="/" class="btn">🏠 العودة للرئيسية</a>
-                <a href="https://t.me/%s" target="_blank" class="btn">💬 فتح البوت</a>
-            </div>
-        </body>
-        </html>
-        ''' % (
-            webhook_info.url,
-            'نشط' if webhook_info.url else 'غير نشط',
-            webhook_info.last_error_message or 'لا يوجد أخطاء',
-            bot.get_me().username if bot.get_me() else 'BotFather'
-        )
-    except Exception as e:
-        return '''
-        <!DOCTYPE html>
-        <html dir="rtl">
-        <head>
-            <title>❌ فشل تعيين الويب هوك</title>
-            <meta charset="utf-8">
-            <style>
-                body {
-                    font-family: Arial, sans-serif;
-                    text-align: center;
-                    padding: 50px;
-                    background: linear-gradient(135deg, #ff416c 0%, #ff4b2b 100%);
-                    color: white;
-                }
-                .container {
-                    background: rgba(255,255,255,0.1);
-                    padding: 40px;
-                    border-radius: 20px;
-                    max-width: 600px;
-                    margin: 0 auto;
-                }
-                .error {
-                    font-size: 3em;
-                    margin-bottom: 20px;
-                }
-                .btn {
-                    display: inline-block;
-                    padding: 10px 20px;
-                    background: white;
-                    color: #ff416c;
-                    text-decoration: none;
-                    border-radius: 5px;
-                    margin: 10px;
-                }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="error">❌</div>
-                <h1>فشل تعيين الويب هوك</h1>
-                <p><strong>الخطأ:</strong> %s</p>
-                <br>
-                <a href="/" class="btn">🏠 العودة للرئيسية</a>
-            </div>
-        </body>
-        </html>
-        ''' % str(e)
-
-@app.route('/remove_webhook', methods=['GET'])
-def remove_webhook():
-    try:
-        bot.remove_webhook()
-        return '''
-        <!DOCTYPE html>
-        <html dir="rtl">
-        <head>
-            <title>✅ تم إزالة الويب هوك</title>
-            <meta charset="utf-8">
-            <style>
-                body {
-                    font-family: Arial, sans-serif;
-                    text-align: center;
-                    padding: 50px;
-                    background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
-                    color: white;
-                }
-                .container {
-                    background: rgba(255,255,255,0.1);
-                    padding: 40px;
-                    border-radius: 20px;
-                    max-width: 600px;
-                    margin: 0 auto;
-                }
-                .success {
-                    font-size: 3em;
-                    margin-bottom: 20px;
-                }
-                .btn {
-                    display: inline-block;
-                    padding: 10px 20px;
-                    background: white;
-                    color: #4CAF50;
-                    text-decoration: none;
-                    border-radius: 5px;
-                    margin: 10px;
-                }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="success">✅</div>
-                <h1>تم إزالة الويب هوك بنجاح</h1>
-                <p>تم إلغاء تفعيل الويب هوك بنجاح.</p>
-                <br>
-                <a href="/" class="btn">🏠 العودة للرئيسية</a>
-                <a href="/set_webhook" class="btn">⚙️ إعادة التعيين</a>
-            </div>
-        </body>
-        </html>
-        '''
-    except Exception as e:
-        return str(e), 500
-
 @app.route('/health')
-def health():
+def health_check():
+    """فحص صحة التطبيق"""
     try:
         bot_info = bot.get_me()
-        webhook_info = bot.get_webhook_info()
-        
         return jsonify({
             'status': 'healthy',
-            'bot': {
-                'id': bot_info.id,
-                'username': bot_info.username,
-                'first_name': bot_info.first_name
-            },
-            'webhook': {
-                'url': webhook_info.url,
-                'has_custom_certificate': webhook_info.has_custom_certificate,
-                'pending_update_count': webhook_info.pending_update_count,
-                'last_error_date': webhook_info.last_error_date,
-                'last_error_message': webhook_info.last_error_message
-            },
-            'stats': {
-                'users': len(user_data),
-                'drivers_available': len(drivers_available),
-                'active_rides': len([r for r in rides.values() if r['status'] in ['requested', 'accepted']]),
-                'total_rides': len(rides)
-            },
-            'timestamp': time.time(),
-            'server_time': time.strftime("%Y-%m-%d %H:%M:%S")
-        })
+            'bot': bot_info.username,
+            'users_count': len(users),
+            'rides_count': len(rides),
+            'active_drivers': len(active_drivers),
+            'timestamp': datetime.now().isoformat()
+        }), 200
     except Exception as e:
-        return jsonify({'status': 'unhealthy', 'error': str(e)}), 500
+        return jsonify({
+            'status': 'unhealthy',
+            'error': str(e),
+            'timestamp': datetime.now().isoformat()
+        }), 500
 
-# معالجات البوت الأساسية
-@bot.message_handler(commands=['start'])
-def start(message):
-    user_id = message.from_user.id
-    username = message.from_user.first_name
-    
-    # حفظ بيانات المستخدم
-    if user_id not in user_data:
-        user_data[user_id] = {
-            'id': user_id,
-            'username': username,
-            'role': None,
-            'phone': None,
-            'location': None,
-            'joined': time.time()
-        }
-    
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add('👤 عميل', '🚖 سائق')
-    
-    bot.send_message(
-        message.chat.id,
-        f"🚖 *مرحباً {username} في بوت وسيل!*\n\n"
-        "خدمة نقل ذكية توفر لك:\n"
-        "• 🚗 رحلات سريعة وآمنة\n"
-        "• 📍 تتبع مباشر\n"
-        "• 💳 دفع إلكتروني\n"
-        "• ⭐ تقييمات موثوقة\n\n"
-        "*الرجاء اختيار دورك:*",
-        parse_mode='Markdown',
-        reply_markup=markup
-    )
+# ============================================================================
+# التشغيل الرئيسي
+# ============================================================================
 
-@bot.message_handler(func=lambda message: message.text in ['👤 عميل', '🚖 سائق'])
-def handle_role(message):
-    user_id = message.from_user.id
-    role = 'customer' if message.text == '👤 عميل' else 'driver'
-    
-    if user_id in user_data:
-        user_data[user_id]['role'] = role
-    
-    if role == 'customer':
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-        markup.add('📍 إرسال موقعي', request_location=True)
-        markup.add('🚖 طلب رحلة', '📋 رحلاتي')
-        markup.add('⚙️ الإعدادات', '❓ المساعدة')
-        
-        bot.send_message(
-            message.chat.id,
-            f"✅ *تم التسجيل كعميل*\n\n"
-            "يمكنك الآن:\n"
-            "1. إرسال موقعك\n"
-            "2. طلب رحلة\n"
-            "3. متابعة رحلاتك\n\n"
-            "اضغط '📍 إرسال موقعي' للبدء",
-            parse_mode='Markdown',
-            reply_markup=markup
-        )
-    else:
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-        markup.add('🟢 توفير الخدمة', '🔴 إيقاف الخدمة')
-        markup.add('📊 الرحلات النشطة', '📋 سجل الرحلات')
-        markup.add('⚙️ إعدادات السائق', '❓ المساعدة')
-        
-        bot.send_message(
-            message.chat.id,
-            f"✅ *تم التسجيل كسائق*\n\n"
-            "يمكنك الآن:\n"
-            "1. تفعيل خدمة الاستقبال\n"
-            "2. استقبال طلبات الركوب\n"
-            "3. متابعة رحلاتك\n\n"
-            "اضغط '🟢 توفير الخدمة' للبدء",
-            parse_mode='Markdown',
-            reply_markup=markup
-        )
+# تحميل البيانات عند التشغيل
+load_data()
 
-@bot.message_handler(commands=['help'])
-def help_command(message):
-    help_text = """
-🚖 *بوت وسيل - دليل المساعدة*
-
-*للعملاء:*
-📍 إرسال موقعي - تحديد موقعك الحالي
-🚖 طلب رحلة - طلب رحلة جديدة
-📋 رحلاتي - عرض الرحلات السابقة
-
-*للسائقين:*
-🟢 توفير الخدمة - تفعيل وضع الاستقبال
-🔴 إيقاف الخدمة - إيقاف استقبال الطلبات
-📊 الرحلات النشطة - عرض الرحلات الجارية
-
-*أوامر عامة:*
-/start - إعادة التشغيل
-/help - عرض هذه الرسالة
-/cancel - إلغاء العملية الحالية
-
-*الدعم الفني:*
-للإبلاغ عن مشاكل أو اقتراحات، راسل الدعم.
-"""
-    bot.send_message(message.chat.id, help_text, parse_mode='Markdown')
-
-@bot.message_handler(content_types=['location'])
-def handle_location(message):
-    user_id = message.from_user.id
-    location = message.location
-    
-    if user_id in user_data:
-        user_data[user_id]['location'] = {
-            'lat': location.latitude,
-            'lon': location.longitude
-        }
-        
-        bot.send_message(
-            message.chat.id,
-            f"📍 *تم تحديد موقعك بنجاح!*\n\n"
-            f"الإحداثيات:\n"
-            f"• خط العرض: `{location.latitude}`\n"
-            f"• خط الطول: `{location.longitude}`\n\n"
-            "يمكنك الآن طلب رحلة.",
-            parse_mode='Markdown'
-        )
-
-@bot.message_handler(func=lambda message: message.text == '🚖 طلب رحلة')
-def request_ride(message):
-    user_id = message.from_user.id
-    
-    if user_id not in user_data or 'location' not in user_data[user_id]:
-        bot.send_message(
-            message.chat.id,
-            "⚠️ *الرجاء تحديد موقعك أولاً*\n\n"
-            "استخدم زر '📍 إرسال موقعي' لتحديد موقعك الحالي.",
-            parse_mode='Markdown'
-        )
-        return
-    
-    # إنشاء طلب رحلة
-    ride_id = len(rides) + 1
-    ride = {
-        'id': ride_id,
-        'customer_id': user_id,
-        'customer_name': user_data[user_id]['username'],
-        'pickup': user_data[user_id]['location'],
-        'destination': None,
-        'status': 'requested',
-        'created_at': time.time(),
-        'driver_id': None,
-        'driver_name': None
-    }
-    
-    rides[ride_id] = ride
-    ride_requests.append(ride_id)
-    
-    # البحث عن سائق متاح
-    available_driver = None
-    for driver_id, is_available in drivers_available.items():
-        if is_available:
-            available_driver = driver_id
-            break
-    
-    if available_driver:
-        # إعلام السائق
-        markup = types.InlineKeyboardMarkup()
-        markup.add(
-            types.InlineKeyboardButton("✅ قبول الرحلة", callback_data=f"accept_{ride_id}"),
-            types.InlineKeyboardButton("❌ رفض", callback_data=f"reject_{ride_id}")
-        )
-        
-        bot.send_message(
-            available_driver,
-            f"🚖 *طلب رحلة جديد #{ride_id}*\n\n"
-            f"👤 العميل: {user_data[user_id]['username']}\n"
-            f"📍 الموقع: {ride['pickup']['lat']:.4f}, {ride['pickup']['lon']:.4f}\n\n"
-            f"⏰ الوقت: {time.strftime('%H:%M:%S')}",
-            parse_mode='Markdown',
-            reply_markup=markup
-        )
-        
-        bot.send_message(
-            message.chat.id,
-            f"✅ *تم إرسال طلبك #{ride_id}*\n\n"
-            "جاري البحث عن سائق قريب...",
-            parse_mode='Markdown'
-        )
-    else:
-        bot.send_message(
-            message.chat.id,
-            f"✅ *تم إرسال طلبك #{ride_id}*\n\n"
-            "⚠️ لا يوجد سائقين متاحين حالياً.\n"
-            "سيتم إعلامك عند توفر سائق.",
-            parse_mode='Markdown'
-        )
-
-@bot.callback_query_handler(func=lambda call: True)
-def handle_callback(call):
-    chat_id = call.message.chat.id
-    data = call.data
-    
-    if data.startswith('accept_'):
-        ride_id = int(data.split('_')[1])
-        ride = rides.get(ride_id)
-        
-        if ride:
-            ride['status'] = 'accepted'
-            ride['driver_id'] = chat_id
-            ride['driver_name'] = user_data.get(chat_id, {}).get('username', 'سائق')
-            
-            # تحديث حالة السائق
-            drivers_available[chat_id] = False
-            
-            # إعلام العميل
-            bot.send_message(
-                ride['customer_id'],
-                f"✅ *تم قبول رحلتك #{ride_id}*\n\n"
-                f"🚖 السائق: {ride['driver_name']}\n"
-                f"📞 رقم السائق: سيظهر قريباً\n\n"
-                "سيصل السائق إلى موقعك خلال دقائق.",
-                parse_mode='Markdown'
-            )
-            
-            # إعلام السائق
-            bot.answer_callback_query(call.id, "✅ تم قبول الرحلة")
-            bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=call.message.message_id,
-                text=f"✅ *قبلت الرحلة #{ride_id}*\n\n"
-                     f"👤 العميل: {ride['customer_name']}\n"
-                     f"📍 توجه إلى موقع العميل",
-                parse_mode='Markdown'
-            )
-    
-    elif data.startswith('reject_'):
-        ride_id = int(data.split('_')[1])
-        bot.answer_callback_query(call.id, "❌ تم رفض الرحلة")
-        bot.delete_message(chat_id, call.message.message_id)
-
-# تشغيل التطبيق
 if __name__ == '__main__':
-    print("🚀 بدء تشغيل بوت وسيل على PythonAnywhere...")
-    print(f"🌐 الرابط: {WEBHOOK_URL}")
-    print(f"🔗 ويب هوك: {WEBHOOK_URL}/webhook")
-    
-    try:
-        bot_info = bot.get_me()
-        print(f"✅ البوت: @{bot_info.username}")
-        print(f"👤 الاسم: {bot_info.first_name}")
-        
-        # تعيين الويب هوك تلقائياً
-        bot.remove_webhook()
-        time.sleep(1)
-        webhook_url = f"{WEBHOOK_URL}/webhook"
-        bot.set_webhook(url=webhook_url)
-        print(f"✅ تم تعيين الويب هوك: {webhook_url}")
-        
-        # تشغيل Flask (للتجربة المحلية فقط)
-        # على PythonAnywhere سيتم تشغيله عبر WSGI
-        app.run(debug=True)
-        
-    except Exception as e:
-        print(f"❌ خطأ: {e}")
-        print("\n🔧 الحلول:")
-        print("1. تأكد من صحة التوكن")
-        print("2. تحقق من اتصال الإنترنت")
-        print(f"3. تأكد من أن البوت موجود على @BotFather")
+    port = int(os.environ.get('PORT', 10000))
+    logger.info(f"🚀 بدء التشغيل على منفذ {port}")
+    app.run(host='0.0.0.0', port=port, debug=False)
