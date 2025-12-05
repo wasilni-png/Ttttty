@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # التوكن - قم بتغييره إلى التوكن الخاص بك
-BOT_TOKEN = "8425005126:AAH9I7qu0gjKEpKX52rFWHsuCn9Bw5jaNr0"  # ضع التوكن هنا
-WEBHOOK_URL = "https://mohammedieke.pythonanywhere.com"  # رابط PythonAnywhere الخاص بك
+BOT_TOKEN = 8425005126:AAExDibH8mxVpITuhA98AFfNcUo9Rgdd98A"  # ضع التوكن هنا
+WEBHOOK_URL = ""  # رابط PythonAnywhere الخاص بك
 
 # تهيئة البوت
 bot = telebot.TeleBot(BOT_TOKEN)
